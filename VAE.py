@@ -139,43 +139,49 @@ def vae_loss(x_recon, x, mu, logvar):
 
 
 
-# 1. Set up device for Apple Silicon
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-print("Using device:", device)
+def main():
 
-# 2. Dataset & DataLoader
-transform = T.Compose([
-    T.Resize((64, 64)),
-    T.ToTensor()  # yields [0,1] for pixel intensities
-])
+    # 1. Set up device for Apple Silicon
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print("Using device:", device)
 
-# dataset = ImageFolder(root="data", transform=transform)
-# dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    # 2. Dataset & DataLoader
+    transform = T.Compose([
+        T.Resize((64, 64)),
+        T.ToTensor()  # yields [0,1] for pixel intensities
+    ])
 
-# # 3. Initialize Model, Optimizer
-# model = VAE(latent_dim=1024).to(device)
-# optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    dataset = ImageFolder(root="data", transform=transform)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-# # 4. Training Loop
-# num_epochs = 20
+    # 3. Initialize Model, Optimizer
+    model = VAE(latent_dim=1024).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-# for epoch in range(num_epochs):
-#     model.train()
-#     total_loss = 0.0
-    
-#     for images, _ in dataloader:
-#         images = images.to(device)  # move data to MPS (Apple GPU)
+    # 4. Training Loop
+    num_epochs = 20
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0.0
         
-#         # Forward pass
-#         x_recon, mu, logvar = model(images)
-#         loss = vae_loss(x_recon, images, mu, logvar)
+        for images, _ in dataloader:
+            images = images.to(device)  # move data to MPS (Apple GPU)
+            
+            # Forward pass
+            x_recon, mu, logvar = model(images)
+            loss = vae_loss(x_recon, images, mu, logvar)
+            
+            # Backprop
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item() * images.size(0)
         
-#         # Backprop
-#         optimizer.zero_grad()
-#         loss.backward()
-#         optimizer.step()
-        
-#         total_loss += loss.item() * images.size(0)
-    
-#     avg_loss = total_loss / len(dataset)
-#     print(f"Epoch [{epoch+1}/{num_epochs}] | Loss: {avg_loss:.4f}")
+        avg_loss = total_loss / len(dataset)
+        print(f"Epoch [{epoch+1}/{num_epochs}] | Loss: {avg_loss:.4f}")
+
+
+if __name__ == "__main__":
+    main()
