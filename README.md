@@ -239,7 +239,6 @@ python controller.py
 
 ## License
 
-Choose a suitable open-source license for your project. For example, MIT:
 
 ```
 MIT License
