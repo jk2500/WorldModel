@@ -153,6 +153,7 @@ def optimize_controller(vae_filepath, mdn_rnn_filepath,
     n_workers = population_size
     best_score = -np.inf  # Track best score
     best_weights = None  # Store best weights
+    recent_scores = []  # Track recent rewards for stopping criterion
 
     # Directory to save weights
     save_directory = "controller_weights"
@@ -189,10 +190,18 @@ def optimize_controller(vae_filepath, mdn_rnn_filepath,
                 np.save(save_path, best_weights)
                 print(f"New best score: {best_score:.2f}. Weights saved to {save_path}")
 
-            # Stop if the score exceeds 900
-            if best_score > 900:
-                print(f"Stopping early as score exceeded 900. Best score: {best_score:.2f}")
-                break
+            # Add the best score of the current generation to recent scores
+            recent_scores.append(current_best_score)
+            if len(recent_scores) > 5:
+                recent_scores.pop(0)  # Keep only the last 5 scores
+
+            # Check stopping criterion based on coefficient of variation
+            if len(recent_scores) == 5:
+                mean_score = np.mean(recent_scores)
+                std_dev = np.std(recent_scores)
+                if mean_score != 0 and (std_dev / mean_score) * 100 < 3:
+                    print(f"Stopping early as coefficient of variation is less than 3%. Best score: {best_score:.2f}")
+                    break
 
             print(f"Best Reward this gen: {rewards[best_idx]:.2f}")
 
