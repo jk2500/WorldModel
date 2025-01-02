@@ -10,179 +10,208 @@ import multiprocessing
 from functools import partial
 
 # === Set Hyperparameters ===
-z_dim = 1024
-hidden_dim = 256
-action_dim = 3
-num_mixtures = 5
-controller_population_size = 12
-mdn_temperature = 2.0
+z_dim = 1024  # Latent dimension size for VAE
+hidden_dim = 256  # Hidden state size for MDNRNN
+action_dim = 3  # Number of action dimensions (steering, gas, brake)
+num_mixtures = 5  # Number of mixture components for MDNRNN
+controller_population_size = 12  # Number of controllers in CMA-ES population
+mdn_temperature = 2.0  # Temperature parameter for MDNRNN
 
 # Transformation for gym environment RGB output
 transform = T.Compose([
-    T.ToPILImage(),       # convert np.ndarray to PIL Image
-    T.Resize((64, 64)),   # resize to 64x64
-    T.ToTensor()          # convert PIL Image to torch.Tensor
+    T.ToPILImage(),       # Convert np.ndarray to PIL Image
+    T.Resize((64, 64)),   # Resize image to 64x64 pixels
+    T.ToTensor()          # Convert PIL Image to torch.Tensor
 ])
 
-
 def load_vae_model(filepath):
+    """Load a pretrained VAE model from the given filepath."""
     vae_model = VAE(latent_dim=z_dim)
-    vae_model.load_state_dict(torch.load(filepath, map_location="cpu",  weights_only=True))
-    vae_model.eval()
+    vae_model.load_state_dict(torch.load(filepath, map_location="cpu"))
+    vae_model.eval()  # Set model to evaluation mode
     return vae_model
 
-
 def load_mdn_rnn_model(filepath):
+    """Load a pretrained MDNRNN model from the given filepath."""
     mdn_rnn_model = MDNRNN(z_dim=z_dim, action_dim=action_dim,
                            hidden_dim=hidden_dim, num_mixtures=num_mixtures)
-    mdn_rnn_model.load_state_dict(torch.load(filepath, map_location="cpu", weights_only=True))
-    mdn_rnn_model.eval()
+    mdn_rnn_model.load_state_dict(torch.load(filepath, map_location="cpu"))
+    mdn_rnn_model.eval()  # Set model to evaluation mode
     return mdn_rnn_model
-
 
 def preprocess_rgb_frame(frame):
     """
-    frame is a NumPy array of shape (height, width, 3) with uint8 values [0..255].
-    This function will return a torch.Tensor of shape (1, 3, 64, 64) in [0..1].
-    """
-    frame_tensor = transform(frame)     # shape (3,64,64)
-    return frame_tensor.unsqueeze(0)    # shape (1,3,64,64)
+    Preprocess an RGB frame from the environment.
 
+    Parameters:
+        frame (np.ndarray): Input frame of shape (height, width, 3) with uint8 values [0..255].
+
+    Returns:
+        torch.Tensor: Preprocessed frame of shape (1, 3, 64, 64) with values in [0..1].
+    """
+    frame_tensor = transform(frame)  # Transform frame to tensor with resizing
+    return frame_tensor.unsqueeze(0)  # Add batch dimension
 
 def evaluate_controller(controller_weights, vae_filepath, mdn_rnn_filepath):
     """
-    Evaluate a single controller (weights) on a brand-new environment.
-    We load models (VAE, MDN-RNN) on CPU to avoid GPU concurrency issues.
+    Evaluate a single controller on a new environment instance.
+
+    Parameters:
+        controller_weights (np.ndarray): Weights for the controller.
+        vae_filepath (str): Path to the pretrained VAE model.
+        mdn_rnn_filepath (str): Path to the pretrained MDNRNN model.
+
+    Returns:
+        float: Cumulative reward achieved by the controller.
     """
-    # 1. Create a separate environment per process
+    # Initialize the environment
     env = gym.make("CarRacing-v3", render_mode="rgb_array")
 
-    # 2. Load VAE and MDNRNN (CPU only for concurrency safety)
+    # Load pretrained models
     vae = load_vae_model(vae_filepath)
     mdn_rnn = load_mdn_rnn_model(mdn_rnn_filepath)
 
-    cumulative_reward = 0
-    obs, _ = env.reset()
-    h, c = None, None
+    cumulative_reward = 0  # Track total reward
+    obs, _ = env.reset()  # Reset environment
+    h, c = None, None  # Initialize hidden states
 
-    # Reshape controller_weights to produce 3D action
+    # Reshape controller weights into a matrix for actions
     weight_matrix = controller_weights.reshape(action_dim, -1)
 
     done = False
     while not done:
-        frame = env.render()  # shape (window_h, window_w, 3)
+        # Render the environment and preprocess the frame
+        frame = env.render()
         frame_preprocessed = preprocess_rgb_frame(frame)
 
-        # Encode frame to latent z
+        # Encode the frame to a latent vector (z)
         with torch.no_grad():
             z, _ = vae.encoder(frame_preprocessed)
 
-        # Convert z to 1D numpy array for the linear controller
+        # Flatten latent vector and hidden state
         z_np = z.cpu().numpy().flatten()
+        h_np = h.cpu().numpy().flatten() if h is not None else np.zeros(hidden_dim)
 
-        # If h is None, create zeros for the controller
-        if h is not None:
-            h_np = h.cpu().numpy().flatten()
-        else:
-            h_np = np.zeros(hidden_dim)
+        # Combine latent vector and hidden state to form input
+        controller_input = np.hstack([z_np, h_np])
 
-        # Compute action via linear controller (NumPy)
-        controller_input = np.hstack([z_np, h_np])  # shape: (z_dim+hidden_dim,)
-        action = weight_matrix @ controller_input   # shape: (3,)
+        # Compute action using the controller weights
+        action = weight_matrix @ controller_input
 
-        # Clip / squash actions
-        action[0] = np.clip(action[0], -1., 1.)  # steering
-        action[1] = np.clip(action[1],  0., 1.)  # gas
-        action[2] = np.clip(action[2],  0., 1.)  # brake
+        # Clip action values to valid ranges
+        action[0] = np.clip(action[0], -1., 1.)  # Steering
+        action[1] = np.clip(action[1],  0., 1.)  # Gas
+        action[2] = np.clip(action[2],  0., 1.)  # Brake
 
-        # Step the environment
+        # Step the environment with the computed action
         obs, reward, terminated, truncated, _ = env.step(action)
         cumulative_reward += reward
 
-        # Convert action to torch.Tensor for MDNRNN
+        # Prepare inputs for MDNRNN
         action_tensor = torch.tensor(action, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        z_seq = z.unsqueeze(1)  # shape: (1, 1, z_dim)
+        z_seq = z.unsqueeze(1)
 
+        # Initialize hidden states if not already done
         if h is None or c is None:
-            num_layers = 1  # Adjust if MDNRNN uses more layers
-            batch_size = z_seq.size(0)  # likely 1
+            num_layers = 1  # Number of RNN layers
+            batch_size = z_seq.size(0)
             h = torch.zeros(num_layers, batch_size, hidden_dim)
             c = torch.zeros(num_layers, batch_size, hidden_dim)
 
+        # Forward pass through MDNRNN
         with torch.no_grad():
-            # Forward pass through MDNRNN
             _, _, _, (h, c) = mdn_rnn.forward(z_seq, action_tensor, (h, c),
                                              temperature=mdn_temperature)
 
+        # Check if episode is done
         done = terminated or truncated
 
-    env.close()
+    env.close()  # Close the environment
     return cumulative_reward
-
 
 def optimize_controller(vae_filepath, mdn_rnn_filepath,
                         population_size=controller_population_size):
     """
-    Parallelize the CMA-ES evaluation step. Each solution in the population
-    is evaluated in its own process with a fresh environment.
+    Optimize the controller using CMA-ES.
+
+    Parameters:
+        vae_filepath (str): Path to the pretrained VAE model.
+        mdn_rnn_filepath (str): Path to the pretrained MDNRNN model.
+        population_size (int): Size of the population for CMA-ES.
+
+    Returns:
+        np.ndarray: Weights of the best controller.
     """
-    # We want a linear mapping from (z_dim + hidden_dim) -> 3
+    # Number of parameters for the controller
     num_params = (z_dim + hidden_dim) * action_dim
 
+    # Initialize CMA-ES
     es = CMAEvolutionStrategy(np.zeros(num_params), 0.5,
                               {"popsize": population_size})
 
-    # Prepare a pool of workers
-    n_workers = population_size  # or more, if you have more CPU cores
+    # Parallelism settings
+    n_workers = population_size
+    best_score = -np.inf  # Track best score
+    best_weights = None  # Store best weights
+
+    # Directory to save weights
+    save_directory = "controller_weights"
+    os.makedirs(save_directory, exist_ok=True)
+
     with multiprocessing.Pool(processes=n_workers) as pool:
         while not es.stop():
-            # 1. Ask for new solutions
+            # Generate candidate solutions
             solutions = es.ask()
-            
-            # 2. Evaluate in parallel
-            # Partial function for fixed VAE/MDNRNN file paths 
+
+            # Evaluate solutions in parallel
             eval_func = partial(evaluate_controller, 
                                 vae_filepath=vae_filepath, 
                                 mdn_rnn_filepath=mdn_rnn_filepath) 
- 
+
             rewards = pool.map(eval_func, solutions) 
- 
-            # 3. CMA-ES wants to minimize cost => use negative reward 
+
+            # Compute fitness (negative reward for minimization)
             fitness = [-r for r in rewards] 
- 
-            # 4. Pass results back to CMA-ES 
+
+            # Update CMA-ES with fitness values
             es.tell(solutions, fitness) 
- 
-            # 5. Print status 
-            best_idx = np.argmin(fitness)  # or best_idx = np.argmax(rewards) 
-            print(f"Best Reward this gen: {rewards[best_idx]:.2f}") 
- 
-        best_sol = es.result.xbest 
-        return best_sol 
- 
- 
+
+            # Track the best solution
+            best_idx = np.argmin(fitness)
+            current_best_score = rewards[best_idx]
+
+            if current_best_score > best_score:
+                best_score = current_best_score
+                best_weights = solutions[best_idx]
+
+                # Save new best weights
+                save_path = os.path.join(save_directory, "best_controller_weights.npy")
+                np.save(save_path, best_weights)
+                print(f"New best score: {best_score:.2f}. Weights saved to {save_path}")
+
+            # Stop if the score exceeds 900
+            if best_score > 900:
+                print(f"Stopping early as score exceeded 900. Best score: {best_score:.2f}")
+                break
+
+            print(f"Best Reward this gen: {rewards[best_idx]:.2f}")
+
+        return best_weights
+
 def main(): 
-    # 1. Filepaths to your pretrained models 
-    vae_filepath = "VAE_1.pth" 
-    mdn_rnn_filepath = "mdn_rnn.pth" 
- 
-    # 2. Optimize Controller in parallel 
+    """Main function to optimize and evaluate the controller."""
+    vae_filepath = "VAE_1.pth"  # Path to VAE model
+    mdn_rnn_filepath = "mdn_rnn.pth"  # Path to MDNRNN model
+
+    # Optimize the controller
     best_controller_weights = optimize_controller(vae_filepath, mdn_rnn_filepath) 
     print("Controller Optimization Complete.") 
- 
-    # 3. Save best weights
-    save_directory = "controller_weights"
-    os.makedirs(save_directory, exist_ok=True)  # Create directory if it doesn't exist
-    save_path = os.path.join(save_directory, "best_controller_weights.npy")
-    np.save(save_path, best_controller_weights)
-    print(f"Best controller weights saved to {save_path}")
 
-    # 4. Final test with best weights (single process)
+    # Evaluate the optimized controller
     final_reward = evaluate_controller(best_controller_weights,
                                        vae_filepath,
                                        mdn_rnn_filepath)
     print(f"Final Test Reward: {final_reward:.2f}")
-
 
 if __name__ == "__main__":
     main()
