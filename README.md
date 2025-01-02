@@ -1,13 +1,15 @@
 # JK2500-WorldModel
 
-A repository showcasing a **World Model** approach for the [CarRacing-v3](https://gymnasium.farama.org/environments/box2d/car_racing/) environment. It includes:
+A repository showcasing a **World Model** approach for the [CarRacing-v3](https://gymnasium.farama.org/environments/box2d/car_racing/) environment. This approach is inspired by [David Ha and Jürgen Schmidhuber’s "World Models"](https://worldmodels.github.io/) paper. The main idea is to learn a compressed representation of the environment through a **Variational Autoencoder (VAE)**, model its temporal dynamics with an **MDN-RNN**, and then use these learned components for policy optimization (via CMA-ES or a standard RL algorithm like PPO).
 
-1. **Variational Autoencoder (VAE)** for image compression into latent representations.  
-2. **Mixture Density Network + RNN (MDN-RNN)** for learning temporal dynamics in the latent space.  
-3. **Controller** that uses the learned latent model to optimize policy actions (via CMA-ES or similar).  
-4. **Training scripts for PPO** (separately, to generate data and also to demonstrate standard RL).  
-5. **Scripts to collect environment frames & actions** into datasets.  
-6. **Script (`Dream.py`)** to generate a "hallucinated" or "dreamed" rollout using only the VAE + MDN-RNN, producing new frames as a video.
+## Contents
+
+1. **Variational Autoencoder (VAE)** — compresses 64×64 RGB frames into a 1024-dimensional latent space.  
+2. **Mixture Density Network + RNN (MDN-RNN)** — learns temporal dynamics in latent space.  
+3. **Controller** — demonstrates how one might optimize actions based on the latent state and MDN-RNN hidden states, using CMA-ES.  
+4. **PPO Training Scripts** — trains a CarRacing agent (to collect data or as a baseline).  
+5. **Data Collection Scripts** — captures (RGB) frames and corresponding actions for training the VAE & MDN-RNN.  
+6. **Dream Rollouts** (`Dream.py`) — uses only the VAE + MDN-RNN to produce a "hallucinated" rollout as a video.
 
 ---
 
@@ -15,259 +17,233 @@ A repository showcasing a **World Model** approach for the [CarRacing-v3](https:
 
 ```
 jk2500-WorldModel/
-├── Dream.py
-├── controller.py
-├── MDNRNN.py
-├── VAE.py
-├── CarRacing.py
-├── CarRacingGym.py
-├── CarRacingImagesActions.py
-├── VAE_1.pth
-└── mdn_rnn.pth
+├── CarRacing.py               # Trains PPO agent on CarRacing-v3
+├── CarRacingGym.py            # Loads and runs the PPO agent interactively
+├── CarRacingImagesActions.py  # Collects frames & actions from a trained PPO
+├── controller.py              # CMA-ES based controller in latent space
+├── Dream.py                   # Generates hallucinated rollouts using VAE + MDN-RNN
+├── MDNRNN.py                  # Implementation + training code for the MDN-RNN
+├── VAE.py                     # Implementation of the VAE (encoder + decoder + training logic)
+├── VAE_1.pth                  # Pre-trained VAE weights (example)
+├── mdn_rnn.pth                # Pre-trained MDN-RNN weights (example)
+└── README.md                  # Project documentation (this file)
 ```
 
 ---
 
-## Main Files
+## Overview of Main Files
 
-### CarRacing.py
+### 1. `CarRacing.py`
+- **Purpose**: Train a PPO agent (via [Stable-Baselines3](https://stable-baselines3.readthedocs.io/en/master/)) on CarRacing-v3.  
+- **Details**:
+  - Uses a CNN policy to handle image-based observations.
+  - Saves tensorboard logs, checkpoint models, and `best_model.zip` in `./car_racing_logs/`.
+  - Contains an `EvalCallback` that can stop training early upon reaching a reward threshold.
 
-- Trains a PPO agent (from Stable-Baselines3) on the CarRacing-v3 environment.
-- Saves the best model and logs in `./car_racing_logs/`.
+### 2. `CarRacingGym.py`
+- **Purpose**: Loads the best or final PPO checkpoint and runs it in a local, human-rendered window for evaluation or demonstration.  
+- **Usage**:
+  - By default, attempts to load `car_racing_logs/best_model.zip`.
+  - Press `Esc` to exit the environment early.
 
-### CarRacingGym.py
+### 3. `CarRacingImagesActions.py`
+- **Purpose**: Collect a dataset of frames and actions from a trained PPO agent.  
+- **Details**:
+  - Runs the agent in `rgb_array` mode, capturing frames (`.png`) every `SAVE_INTERVAL` steps and logging actions to `actions.txt`.
+  - Organizes data into `MDN-RNN/episode_X/` directories (where X is the episode number).
+  - This data can be used offline to train the VAE and MDN-RNN.
 
-- Loads the best PPO model trained in CarRacing.py and runs it interactively in a human-rendered mode.
+### 4. `VAE.py`
+- **Purpose**: Implementation of the Variational Autoencoder for 64×64 RGB frames.  
+- **Key Components**:
+  - **Encoder**: 4 convolutional layers reducing a 64×64×3 image into a 1024-D vector (mu and logvar).  
+  - **Decoder**: Uses transposed convolutions to reconstruct 64×64 images from a 1024-D latent.  
+  - **Training**: Includes a sample training loop (commented in `main()`), with a `vae_loss` function combining reconstruction (BCE) and KL divergence.
 
-### CarRacingImagesActions.py
+### 5. `MDNRNN.py`
+- **Purpose**: Implementation and training routine for a Mixture Density Network RNN.  
+- **Details**:
+  - **Input**: (z, action) at each timestep, where `z` is the latent from the VAE.  
+  - **Output**: Parameters of a mixture of Gaussians (π, µ, σ) predicting the next latent vector `z_{t+1}`.  
+  - **MDN Loss**: Negative log-likelihood of the true latent under the predicted mixture distribution.  
+  - **Training**:
+    - A function `train_mdnrnn(...)` that looks for data in folders like `MDN-RNN/episode_*`.
+    - Each episode folder should contain `representations_z.npy`, `representations_mu.npy`, and `actions.txt`.
 
-- Uses the trained PPO model to collect episodes.
-- Renders and saves the frames (.png images) and logs the actions (`actions.txt`) at specified intervals.
-- The collected frames and actions can be used for training the VAE and MDN-RNN.
+### 6. `controller.py`
+- **Purpose**: Demonstrates how one might optimize a policy (controller) entirely in latent space using CMA-ES (rather than PPO).  
+- **Approach**:
+  - Loads `VAE_1.pth` and `mdn_rnn.pth`.
+  - A linear mapping from `[z, h] -> actions` is parameterized; CMA-ES searches for the best parameters to maximize reward in CarRacing.  
+  - Each candidate is evaluated by stepping in the real environment but using the MDN-RNN to predict future latent states.
 
-### VAE.py
-
-- Contains implementation of a Variational Autoencoder for compressing 64×64 RGB images into a 1024-dimensional latent vector.
-- The script includes Encoder, Decoder, and a VAE wrapper class.
-- Also includes a (commented out) training loop for the VAE.
-
-### MDNRNN.py
-
-- Implementation of an MDN-RNN, which predicts the next latent vector given the current latent vector and action.
-- The MDN output predicts mixture parameters (π, µ, σ).
-- Includes a training script (`train_mdnrnn()`) that loads multi-episode data from a specified folder structure.
-
-### controller.py
-
-- Demonstrates how one might evolve or optimize a controller that uses the VAE + MDN-RNN’s internal state.
-- Uses CMA-ES (cma library) to find action weights that maximize cumulative reward in a simulated loop with the MDN-RNN.
-
-### Dream.py
-
-- Loads pre-trained `VAE_1.pth` and `mdn_rnn.pth`.
-- Takes the first frame of a recorded CarRacing episode, encodes it with the VAE, and then rolls forward in latent space via the MDN-RNN for 999 steps.
-- Decodes each predicted latent back to an image and stitches them into a video (.mp4).
+### 7. `Dream.py`
+- **Purpose**: Generate "hallucinated" or "dreamed" rollouts by using only the VAE + MDN-RNN (no real environment).  
+- **How It Works**:
+  - Loads an initial frame from a real episode (or a manually selected frame).
+  - Encodes it to get `z_0`.
+  - Iteratively predicts next latent `z_{t+1}` using MDN-RNN and decodes it back to an image.  
+  - Produces a video of predicted frames (`.mp4`).
 
 ---
 
 ## Pre-trained Checkpoints
 
-- **VAE_1.pth**: Pre-trained VAE weights.
-- **mdn_rnn.pth**: Pre-trained MDN-RNN weights.
+- **`VAE_1.pth`**: Example of a pre-trained VAE.  
+- **`mdn_rnn.pth`**: Example of a pre-trained MDN-RNN.  
+
+If these are not provided or you want to train your own, see the training instructions below.
 
 ---
 
-## Usage
+## Getting Started
 
-Below is a general outline of how to use the code in this repository. Feel free to adapt based on your workflow or platform (e.g., local machine vs. cloud, CPU vs. GPU).
+Below is a quick-start guide. Adjust paths and hyperparameters as needed.
 
 ### 1. Install Dependencies
 
-**Python 3.8+ recommended**
-
-Install required packages (using pip, conda, or poetry, etc.):
+**Python 3.8+ recommended**  
+Install the required packages (this example uses `pip`):
 
 ```bash
 pip install torch torchvision stable-baselines3 gymnasium matplotlib cma opencv-python
 ```
 
-**Note:**
+**Additional Notes**:
 
-- For Apple Silicon (M1/M2), ensure you have the correct torch wheels installed (e.g., `torch>=2.0, <2.1` with mps support).
-- If you need to record or edit videos, install FFmpeg.
-- For GPU usage on NVIDIA, install CUDA-compatible PyTorch.
+- For Apple Silicon (M1/M2), ensure a compatible PyTorch build with MPS support (e.g., `pip install torch torchvision --index-url https://download.pytorch.org/whl/nightly/cpu` or as recommended by PyTorch docs).  
+- If you need video rendering (`.mp4`) support, install [FFmpeg](https://ffmpeg.org/).  
+- For NVIDIA GPUs, install CUDA-compatible PyTorch wheels.
 
 ### 2. Train a PPO Policy (Optional)
 
-If you want to train your own CarRacing agent from scratch, run:
+Run:
 
 ```bash
 python CarRacing.py
 ```
 
-This will:
+- Trains PPO for ~500k timesteps on CarRacing-v3 (you can adjust `training_timesteps`).  
+- Model checkpoints and logs go to `./car_racing_logs/`.
 
-- Train PPO on CarRacing-v3 for 500k timesteps (configurable in code).
-- Save logs and the best model in `./car_racing_logs/`.
+### 3. Run the Trained PPO Agent
 
-### 3. Run the Trained Agent
-
-To play the trained model (the best or final PPO checkpoint) in a local interactive window:
+To see your trained agent in action:
 
 ```bash
 python CarRacingGym.py
 ```
 
-This will load `car_racing_logs/best_model.zip` by default.
+- Loads `car_racing_logs/best_model.zip` by default (or final checkpoint if `best_model.zip` isn’t available).  
+- Renders the environment in a window.
 
-Press `Esc` to exit the CarRacing environment early if needed.
+### 4. Collect Data for VAE & MDN-RNN
 
-### 4. Collect Data (Frames & Actions)
-
-The script `CarRacingImagesActions.py` runs the trained PPO agent to collect (RGB) frames and actions for further training the VAE and MDN-RNN.
-
-By default, it saves data in `MDN-RNN/episode_*/`.
-
-You can configure `NUM_EPISODES`, `EPISODE_LENGTH`, and `SAVE_INTERVAL` at the top of the script:
+Run:
 
 ```bash
 python CarRacingImagesActions.py
 ```
 
-It will output images (`Img_step_XX.png`) and `actions.txt` (logging `[steering, gas, brake]` each step).
+- Captures environment frames (.png) and actions in `MDN-RNN/episode_*`.  
+- Configure `NUM_EPISODES`, `EPISODE_LENGTH`, and `SAVE_INTERVAL` inside the script.
 
 ### 5. Train the VAE
 
-Inside `VAE.py`, you’ll find a skeleton training loop (commented out).
+Inside `VAE.py`:
 
-Modify the dataset path and hyperparameters, then un-comment and run directly:
+- There is a sample training loop (commented out in `main()`) which uses an `ImageFolder` dataset.  
+- You can place your collected PNG frames into a suitable folder structure for `ImageFolder`. Or adapt the loading logic to your data.  
+- Run (after un-commenting the training code in `main()`):
 
-```python
-# dataset = ImageFolder(root="data", transform=transform)
-# dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-#
-# model = VAE(latent_dim=1024).to(device)
-# ...
-# for epoch in range(num_epochs):
-#     ...
-# torch.save(model.state_dict(), "VAE_1.pth")
+```bash
+python VAE.py
 ```
 
-Alternatively, if you already have `VAE_1.pth`, skip this step.
+- Saves `VAE_1.pth` upon completion.
 
 ### 6. Train the MDN-RNN
-
-`MDNRNN.py` includes a function `train_mdnrnn(...)`.
-
-It looks for data in a structure like:
-
-```
-MDN-RNN/
-  episode_1/
-    representations_z.npy
-    representations_mu.npy
-    actions.txt
-  ...
-```
-
-**Note:** You need to first transform raw images into latent vectors (`representations_z.npy` / `representations_mu.npy`). This is not explicitly shown in the code but typically done by running your VAE on each image to produce latents.
-
-After you have the `.npy` latent files and `actions.txt`, run:
 
 ```bash
 python MDNRNN.py
 ```
 
-This will train an MDN-RNN and save weights to `mdn_rnn.pth`.
+- Looks for directories `MDN-RNN/episode_*/` containing `representations_z.npy`, `representations_mu.npy`, and `actions.txt`.  
+- In practice, you need to run your VAE’s encoder on each saved frame to generate those `.npy` files. (Scripts for that step are not included here but are straightforward to implement using `VAE.encoder(...)`.)
 
-### 7. Generate Dream Rollouts (Dream.py)
+Once done, you get `mdn_rnn.pth`.
 
-Once you have:
-
-- A trained VAE (`VAE_1.pth`)
-- A trained MDN-RNN (`mdn_rnn.pth`)
-- A set of recorded actions (in some `actions.txt`)
-
-Adjust the paths near the top of `Dream.py` (e.g., `actions_file` and `frames_folder`), then run:
+### 7. Generate a "Dream" Rollout
 
 ```bash
 python Dream.py
 ```
 
-**What it does:**
+- Uses the loaded `VAE_1.pth` and `mdn_rnn.pth` to produce a side-by-side video: left = original frame, right = reconstruction from the VAE.  
+- Steps forward in time purely in latent space (via MDN-RNN).  
 
-- Loads the first frame from an episode.
-- Encodes it to latent `z_0`.
-- Iteratively uses the MDN-RNN to predict the next latent `z_{t+1}` given (`z_t`, `a_t`).
-- Decodes each predicted latent frame via the VAE decoder.
-- Writes frames to a `.mp4` video (`predicted_frames_1_to_999.mp4`).
-
-### 8. Controller Optimization via CMA-ES (Optional)
-
-`controller.py` shows an experimental method to learn direct action weights from the hidden state (`h, c`) and latent `z_t` using CMA-ES.
-
-It does not rely on the PPO approach; it aims to find an action policy purely in latent space.
-
-To run:
+### 8. Latent-Space Controller Optimization (Optional)
 
 ```bash
 python controller.py
 ```
 
-**The script:**
-
-- Loads `VAE_1.pth` and `mdn_rnn.pth`.
-- Creates a CarRacing environment.
-- Evolves a linear controller (mapping `[z, h] -> actions`) via CMA-ES to maximize reward.
-- Prints the best controller parameters and final test reward.
+- Evolves a linear controller from `[z_t, hidden_state] -> [steering, gas, brake]` using [CMA-ES](https://github.com/CMA-ES/pycma).  
+- Saves the best weights to `controller_weights/best_controller_weights.npy`.  
+- Prints the best test reward.
 
 ---
 
 ## Requirements
 
 - Python 3.8+
-- PyTorch
+- PyTorch ≥ 1.12
 - Stable-Baselines3
-- Gymnasium (and Box2D dependencies if needed)
-- Matplotlib (for saving images)
+- Gymnasium (with Box2D dependencies)
+- Matplotlib
 - OpenCV (for video writing)
-- cma (for controller optimization)
+- cma
 
 ---
 
 ## Notes & Tips
 
-### Apple Silicon (M1/M2) Support
+1. **Apple Silicon (M1/M2)**:  
+   - If running on MPS, check code references to `device="mps"` in `CarRacing.py` or `VAE.py`.  
+   - Install the correct PyTorch version for MPS acceleration.
 
-- Much of the code references `mps` device. If you’re on macOS with an M1 or M2 chip, make sure you install a version of PyTorch that supports Metal Performance Shaders (MPS).
+2. **Collecting Data**:  
+   - Typical flow is to train a PPO agent first, then run `CarRacingImagesActions.py` to gather frames and actions for VAE/MDN-RNN training.  
+   - Alternatively, any policy (random or hand-coded) can generate data.
 
-### Data Collection
+3. **Hyperparameters**:  
+   - Current defaults use a 1024-D latent (`z_dim=1024`) which can be expensive. Consider smaller latent sizes (e.g., 64–256) if you need faster training.
 
-- The repository scripts rely on a simple flow: first collect images & actions (via a trained PPO), then process them offline to generate latent vectors for the MDN-RNN training.
+4. **Video Rendering**:  
+   - `Dream.py` uses OpenCV to write an `.mp4`. If you encounter codec issues, ensure you have FFmpeg installed or modify the `fourcc` to a suitable codec.
 
-### Video Rendering
+5. **MDN-RNN**:  
+   - The default number of mixtures is 5. Higher mixtures can capture more complex distributions but also increase training time.
 
-- `Dream.py` uses OpenCV to write `.mp4` files. If you have any issues with codecs, install FFmpeg or check that your OpenCV was compiled with ffmpeg support.
-
-### Hyperparameters
-
-- The scripts generally use large latent dimensions (1024). You can experiment with smaller `z_dim` to speed up training.
-
-### Environment Differences
-
-- The environment `CarRacing-v3` has slightly different observation shapes or reward structure than previous versions. Make sure to install a Gymnasium version that supports it.
+6. **Controller vs. PPO**:  
+   - The `controller.py` script is an alternative approach to learning actions. It bypasses typical RL policies (like PPO) in favor of a direct search in the parameter space of a linear policy.
 
 ---
 
 ## Acknowledgments
 
-- David Ha and Jürgen Schmidhuber’s World Models for the inspiration behind training a VAE + MDN-RNN for environment modeling.
-- Stable-Baselines3 for the PPO RL implementation.
-- The open-source community for continued improvements to RL, Gym, and PyTorch libraries.
+- Inspired by [David Ha and Jürgen Schmidhuber’s "World Models"](https://worldmodels.github.io/).  
+- Thanks to the [Stable-Baselines3](https://stable-baselines3.readthedocs.io/en/master/) team and open-source contributors for excellent RL frameworks.
 
 ---
 
 ## License
 
-This project is provided under an open-source license. See `LICENSE` for details (if you have a LICENSE file). Otherwise, adapt or include whichever license you prefer.
+Choose a suitable open-source license for your project. For example, MIT:
 
+```
+MIT License
+Copyright (c) 2023 ...
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+...
