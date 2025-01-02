@@ -14,7 +14,7 @@ z_dim = 1024
 hidden_dim = 256
 action_dim = 3
 num_mixtures = 5
-controller_population_size = 10
+controller_population_size = 12
 mdn_temperature = 2.0
 
 # Transformation for gym environment RGB output
@@ -27,7 +27,7 @@ transform = T.Compose([
 
 def load_vae_model(filepath):
     vae_model = VAE(latent_dim=z_dim)
-    vae_model.load_state_dict(torch.load(filepath, map_location="cpu"))
+    vae_model.load_state_dict(torch.load(filepath, map_location="cpu",  weights_only=True))
     vae_model.eval()
     return vae_model
 
@@ -35,7 +35,7 @@ def load_vae_model(filepath):
 def load_mdn_rnn_model(filepath):
     mdn_rnn_model = MDNRNN(z_dim=z_dim, action_dim=action_dim,
                            hidden_dim=hidden_dim, num_mixtures=num_mixtures)
-    mdn_rnn_model.load_state_dict(torch.load(filepath, map_location="cpu"))
+    mdn_rnn_model.load_state_dict(torch.load(filepath, map_location="cpu", weights_only=True))
     mdn_rnn_model.eval()
     return mdn_rnn_model
 
@@ -140,36 +140,36 @@ def optimize_controller(vae_filepath, mdn_rnn_filepath,
             solutions = es.ask()
             
             # 2. Evaluate in parallel
-            # Partial function for fixed VAE/MDNRNN file paths
-            eval_func = partial(evaluate_controller,
-                                vae_filepath=vae_filepath,
-                                mdn_rnn_filepath=mdn_rnn_filepath)
-
-            rewards = pool.map(eval_func, solutions)
-
-            # 3. CMA-ES wants to minimize cost => use negative reward
-            fitness = [-r for r in rewards]
-
-            # 4. Pass results back to CMA-ES
-            es.tell(solutions, fitness)
-
-            # 5. Print status
-            best_idx = np.argmin(fitness)  # or best_idx = np.argmax(rewards)
-            print(f"Best Reward this gen: {rewards[best_idx]:.2f}")
-
-        best_sol = es.result.xbest
-        return best_sol
-
-
-def main():
-    # 1. Filepaths to your pretrained models
-    vae_filepath = "VAE_1.pth"
-    mdn_rnn_filepath = "mdn_rnn.pth"
-
-    # 2. Optimize Controller in parallel
-    best_controller_weights = optimize_controller(vae_filepath, mdn_rnn_filepath)
-    print("Controller Optimization Complete.")
-
+            # Partial function for fixed VAE/MDNRNN file paths 
+            eval_func = partial(evaluate_controller, 
+                                vae_filepath=vae_filepath, 
+                                mdn_rnn_filepath=mdn_rnn_filepath) 
+ 
+            rewards = pool.map(eval_func, solutions) 
+ 
+            # 3. CMA-ES wants to minimize cost => use negative reward 
+            fitness = [-r for r in rewards] 
+ 
+            # 4. Pass results back to CMA-ES 
+            es.tell(solutions, fitness) 
+ 
+            # 5. Print status 
+            best_idx = np.argmin(fitness)  # or best_idx = np.argmax(rewards) 
+            print(f"Best Reward this gen: {rewards[best_idx]:.2f}") 
+ 
+        best_sol = es.result.xbest 
+        return best_sol 
+ 
+ 
+def main(): 
+    # 1. Filepaths to your pretrained models 
+    vae_filepath = "VAE_1.pth" 
+    mdn_rnn_filepath = "mdn_rnn.pth" 
+ 
+    # 2. Optimize Controller in parallel 
+    best_controller_weights = optimize_controller(vae_filepath, mdn_rnn_filepath) 
+    print("Controller Optimization Complete.") 
+ 
     # 3. Save best weights
     save_directory = "controller_weights"
     os.makedirs(save_directory, exist_ok=True)  # Create directory if it doesn't exist
